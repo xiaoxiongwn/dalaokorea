@@ -151,7 +151,7 @@ class WeirdHostRenewal:
                 #cf_screenshot = f"{self.screenshot_dir}/cf.png"
                 #sb.save_screenshot(cf_screenshot)
                 #self.send_telegram_notify("通过Cloudflare整页挑战", cf_screenshot)
-
+                
                 # 5. 进入服务器面板
                 self.log(f"📂 正在进入服务器面板...")
                 sb.uc_open_with_reconnect(URL_APP_PANEL, reconnect_time=5)
@@ -171,37 +171,77 @@ class WeirdHostRenewal:
                     
                     # 7. 局部Cloudflare挑战
                     self.log("⏳ 局部Cloudflare挑战")
+                    # 点击续期后给页面一点时间加载Turnstile
+                    time.sleep(3)
                     token = None
                     for i in range(2):
                         self.log(f"第 {i+1} 次尝试")
                         self.move_mouse_human(sb)
-                        sb.uc_gui_click_captcha()
-                        # 等待token
-                        for _ in range(15):
-                            time.sleep(10)
-                            token = sb.get_attribute('input[name="cf-turnstile-response"]',"value")
-                            if token:
-                                break
+                        # 保存一次当前状态方便排查
+                        debug_screenshot = f"{self.screenshot_dir}/cf_try_{i+1}.png"
+                        sb.save_screenshot(debug_screenshot)
+                        self.send_telegram_notify(f"⏳cf挑战第{i+1}次尝试", debug_screenshot)
+                        try:
+                            self.log("🖱️ 尝试点击CF验证")
+                            sb.uc_gui_click_captcha()
+                        except Exception as e:
+                            self.log(f"⚠️ click captcha异常: {e}")
+                        # 等待token出现
+                        for j in range(30):
+                            time.sleep(5)
+                            try:
+                                if sb.is_element_present(
+                                    'input[name="cf-turnstile-response"]'
+                                ):
+                                    token = sb.get_attribute(
+                                        'input[name="cf-turnstile-response"]',
+                                        "value"
+                                    )
+                                    if token:
+                                        self.log("✅ Cloudflare Turnstile验证成功")
+                                        self.log(f"Token length={len(token)}")
+                                        break
+                            except Exception as e:
+                                self.log(f"⚠️ 获取token异常: {e}")
+                            self.log(f"⏳ 等待Turnstile token... {j+1}/30")
                         if token:
-                            self.log("✅ Cloudflare Turnstile验证成功")
-                            print(f"Token length={len(token)}")
                             break
+                        # 第一次click没有成功，尝试handle
                         self.log("⚠️ click后没有token，尝试handle")
-                        self.move_mouse_human(sb)
-                        sb.uc_gui_handle_captcha()
+                        try:
+                            self.move_mouse_human(sb)
+                            if sb.is_element_present(
+                                "iframe[src*='challenges.cloudflare.com']"
+                            ):
+                                sb.uc_gui_handle_captcha()
+                                self.log("✅ 执行handle captcha")
+                            else:
+                                self.log("⚠️ 没检测到CF iframe")
+                        except Exception as e:
+                            self.log(f"⚠️ handle captcha异常: {e}")
                         time.sleep(10)
                         # handle后再次检查
-                        token = sb.get_attribute('input[name="cf-turnstile-response"]',"value")
-                        if token:
-                            self.log("✅ handle后获取Token")
-                            break
+                        try:
+                            if sb.is_element_present(
+                                'input[name="cf-turnstile-response"]'
+                            ):
+                                token = sb.get_attribute(
+                                    'input[name="cf-turnstile-response"]',
+                                    "value"
+                                )
+                                if token:
+                                    self.log("✅ handle后获取Token")
+                                    break
+                        except Exception as e:
+                            self.log(f"⚠️ handle后获取token异常: {e}")
                     if not token:
                         self.log("❌ Cloudflare验证失败")
                         cf_screenshot = f"{self.screenshot_dir}/cf_failed.png"
                         sb.save_screenshot(cf_screenshot)
-                        self.send_telegram_notify("CF失败", cf_screenshot)
+                        self.send_telegram_notify("CF失败",cf_screenshot)
                         return
                     self.log("🎉 CF验证完成")
+
                     final_screenshot = f"{self.screenshot_dir}/final.png"
                     sb.save_screenshot(final_screenshot)
                     #self.send_telegram_notify("已点击续期并通过cf挑战", final_screenshot)
