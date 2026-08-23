@@ -79,6 +79,64 @@ class WeirdHostRenewal:
         except Exception as e:
             self.log(f"❌ TG 推送失败: {e}")
 
+    def check_token(self, sb):
+        token = sb.execute_script("""
+        let el = document.querySelector('input[name="cf-turnstile-response"]');
+        return el ? el.value : null;
+        """)
+        if token:
+            return True
+        else:
+            return False
+
+    def get_turnstile_token(self, sb):
+        try:
+            token = sb.execute_script("""
+            let tokens = [];
+            // 1. 主页面扫描
+            document.querySelectorAll(
+                'input, textarea'
+            ).forEach(el => {
+                let v = el.value || "";
+                if (v.length > 50) {
+                    tokens.push(v);
+                }
+            });
+            // 2. iframe扫描
+            document.querySelectorAll(
+                "iframe"
+            ).forEach(frame => {
+                try {
+                    let doc =
+                        frame.contentDocument ||
+                        frame.contentWindow.document;
+                    if (doc) {
+                        doc.querySelectorAll(
+                            'input, textarea'
+                        ).forEach(el => {
+                            let v = el.value || "";
+                            if (v.length > 50) {
+                                tokens.push(v);
+                            }
+                        });
+                    }
+                } catch(e) {}
+            });
+            // 3. 返回最长token
+            if (tokens.length) {
+                tokens.sort(
+                    (a,b)=>b.length-a.length
+                );
+                return tokens[0];
+            }
+            return "";
+            """)
+            if token and len(token) > 50:
+                return token
+        except Exception as e:
+            self.log(f"⚠️ Token扫描异常: {e}")
+        return None    
+
     def run(self):
         self.log("=" * 40)
         self.log("🚀 WeirdHost - Renew流程")
@@ -160,74 +218,104 @@ class WeirdHostRenewal:
                 #sb.save_screenshot(server_screenshot)
                 #self.send_telegram_notify(f"进入服务器 {NUM} 面板", server_screenshot)
 
-                # 6. 点击续期按钮
+                # 6. 判断续期按钮是否可点并点击
+                sb.scroll_to_bottom() # 滚动到底部
                 self.log("⏳ 开始检查续期按钮是否可以点击")
+                status_element = sb.find_element('p[class*="StatusText"]')
+                status_text = status_element.text.strip()
+
+                if not "지금 연장이 가능해요" in status_text:
+                    page_text = sb.get_text("body")
+                    timestamp_pattern = r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
+                    match_days = re.search(timestamp_pattern, page_text, re.IGNORECASE)
+                    timestamp = match_days.group(0)
+                    final_screenshot = f"{self.screenshot_dir}/final.png"
+                    sb.save_screenshot(final_screenshot)
+                    msg = f"🎉WeirdHost-家宽 续期按钮冷却中\n⏳服务器到期时间：{timestamp}"
+                    self.log(msg)
+                    self.send_telegram_notify(msg, final_screenshot)
+                    return
+
+                self.log("✅ 续期按钮可点击")
                 btn = '//button[contains(normalize-space(.), "연장하기")]'
                 sb.wait_for_element_visible(btn, timeout=10)
-                if sb.is_element_enabled(btn):
-                    self.log("✅ 续期按钮可点击")
-                    sb.click(btn)
-                    self.log("✅ 已点击 연장하기")
+                sb.click(btn)
+                self.log("✅ 已点击 연장하기")
+                time.sleep(10)
+                #renew_screenshot = f"{self.screenshot_dir}/renew.png"
+                #sb.save_screenshot(renew_screenshot)
+                #self.send_telegram_notify("已点击续期", renew_screenshot)
                     
-                    # 7. 局部Cloudflare挑战
-                    time.sleep(3)
-                    self.log("⏳ 局部Cloudflare挑战")
-                    token = None
-                    for i in range(2):
-                        self.log(f"第 {i+1} 次尝试")
-                        self.move_mouse_human(sb)
-                        sb.uc_gui_click_captcha()
-                        # 等待token
-                        for _ in range(15):
-                            time.sleep(6)
-                            token = sb.get_attribute('input[name="cf-turnstile-response"]',"value")
-                            if token:
+                # 7. 局部Cloudflare挑战
+                time.sleep(3)
+                self.log("⏳ 局部Cloudflare挑战")
+                token = None
+                for i in range(2):
+                    self.log(f"第 {i+1} 次尝试")
+                    self.move_mouse_human(sb)
+                    sb.uc_gui_click_captcha()
+                    # 等待CF完成
+                    for n in range(45):
+                        token = self.get_turnstile_token(sb)
+                        if token:
+                            self.log(f"✅ 获取Turnstile Token 长度={len(token)}")
+                            break
+                        # 检查是否已经通过CF
+                        try:
+                            page_lower = (
+                                sb.get_page_source()
+                                .lower()
+                            )
+                            cf_words = [
+                                "verify you are human",
+                                "just a moment",
+                                "checking your browser",
+                                "cloudflare"
+                            ]
+                            still_cf = any(
+                                x in page_lower
+                                for x in cf_words
+                            )
+                            if not still_cf:
+                                self.log("✅ CF挑战页面已消失")
                                 break
-                        if token:
-                            self.log("✅ Cloudflare Turnstile验证成功")
-                            print(f"Token length={len(token)}")
-                            break
-                        self.log("⚠️ click后没有token，尝试handle")
-                        self.move_mouse_human(sb)
+                        except:
+                            pass
+                        time.sleep(2)
+                    if token:
+                        break
+                    self.log("⚠️ 未获取token，尝试handle")
+                    self.move_mouse_human(sb)
+                    try:
                         sb.uc_gui_handle_captcha()
-                        time.sleep(6)
-                        # handle后再次检查
-                        token = sb.get_attribute('input[name="cf-turnstile-response"]',"value")
-                        if token:
-                            self.log("✅ handle后获取Token")
-                            break
-                    if not token:
-                        self.log("❌ Cloudflare验证失败")
-                        cf_screenshot = f"{self.screenshot_dir}/cf_failed.png"
-                        sb.save_screenshot(cf_screenshot)
-                        self.send_telegram_notify("CF失败", cf_screenshot)
-                        return
+                    except Exception as e:
+                        self.log(f"handle异常: {e}")
+                    time.sleep(5)
+                    token = self.get_turnstile_token(sb)
+                    if token:
+                        self.log(f"✅ handle后获取Token 长度={len(token)}")
+                        break
+                # 最终判断
+                if token:
                     self.log("🎉 CF验证完成")
-                    final_screenshot = f"{self.screenshot_dir}/final.png"
-                    sb.save_screenshot(final_screenshot)
-                    #self.send_telegram_notify("已点击续期并通过cf挑战", final_screenshot)
-                    
-                    # 8. 再次进入管理面板
-                    self.log(f"📂 再次进入面板...")
-                    sb.uc_open_with_reconnect(URL_APP_PANEL, reconnect_time=5)
-                    self.human_wait(6, 10)
-                    page_text = sb.get_text("body")
-                    timestamp_pattern = r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
-                    match_days = re.search(timestamp_pattern, page_text, re.IGNORECASE)
-                    timestamp = match_days.group(0)
-                    msg = f"✅ WeirdHost-家宽 续期成功\n\n🕒 到期时间为: {timestamp}\n"
-                    self.send_telegram_notify(msg, final_screenshot)
                 else:
-                    # 7. 无需续期直接打印到期时间
-                    self.log("❌ 续期按钮不可点击")
-                    page_text = sb.get_text("body")
-                    timestamp_pattern = r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
-                    match_days = re.search(timestamp_pattern, page_text, re.IGNORECASE)
-                    timestamp = match_days.group(0)
-                    final_screenshot = f"{self.screenshot_dir}/final.png"
-                    sb.save_screenshot(final_screenshot)
-                    msg = f"✅ WeirdHost-家宽 无需续期\n\n🕒 到期时间为: {timestamp}\n"
-                    self.send_telegram_notify(msg, final_screenshot)
+                    self.log("⚠️ 未发现Token，继续检查页面状态")
+              
+                final_screenshot = f"{self.screenshot_dir}/final.png"
+                sb.save_screenshot(final_screenshot)
+                #self.send_telegram_notify("已点击续期并通过cf挑战", final_screenshot)
+                    
+                # 8. 再次进入管理面板
+                self.log(f"📂 再次进入面板...")
+                sb.uc_open_with_reconnect(URL_APP_PANEL, reconnect_time=5)
+                self.human_wait(6, 10)
+                sb.scroll_to_bottom() # 滚动到底部
+                page_text = sb.get_text("body")
+                timestamp_pattern = r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
+                match_days = re.search(timestamp_pattern, page_text, re.IGNORECASE)
+                timestamp = match_days.group(0)
+                msg = f"🎉WeirdHost-语言版-家宽 续期成功\n🕒服务器到期时间为: {timestamp}\n"
+                self.send_telegram_notify(msg, final_screenshot)
 
             except Exception as e:
                 self.log(f"❌ 运行异常: {e}")
