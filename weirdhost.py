@@ -140,25 +140,30 @@ class WeirdHostRenewal:
         """保留原脚本的页面交互预热逻辑。"""
         try:
             for _ in range(3):
-                sb.slow_click("body", force=True)
+                sb.slow_click("body")
                 time.sleep(random.uniform(0.5, 1.2))
         except Exception as e:
             self.log(f"⚠️ 页面交互预热失败，继续执行：{e}")
 
     def get_turnstile_token(self, sb):
         try:
+            # uc=True 这种反检测模式下，execute_script 不会自动把代码包成函数，
+            # 顶层直接写 return 会报 "Illegal return statement"。
+            # 用立即执行函数 (function(){...})() 包一层，不管哪种模式下 return 都合法。
             token = sb.execute_script("""
-                let tokens = [];
-                document.querySelectorAll('input, textarea').forEach(el => {
-                    let v = el.value || "";
-                    if (v.length > 50) tokens.push(v);
-                });
+                (function() {
+                    let tokens = [];
+                    document.querySelectorAll('input, textarea').forEach(el => {
+                        let v = el.value || "";
+                        if (v.length > 50) tokens.push(v);
+                    });
 
-                if (tokens.length) {
-                    tokens.sort((a, b) => b.length - a.length);
-                    return tokens[0];
-                }
-                return "";
+                    if (tokens.length) {
+                        tokens.sort((a, b) => b.length - a.length);
+                        return tokens[0];
+                    }
+                    return "";
+                })();
             """)
 
             if token and len(token) > 50:
@@ -248,10 +253,19 @@ class WeirdHostRenewal:
         if match:
             remaining = f"{match.group(1)}{match.group(2)}"
             self.log(f"⏳ 检测到冷却提示：{remaining}后可以续期 -> 时间尚未达到")
-            return False
+            return "cooldown"
+
+        # 没搜到冷却提示，不代表就一定能续期——也可能是页面根本没加载出真实内容
+        # （比如还卡在 Cloudflare 验证页、或者没登录成功）。
+        # 这里再确认一下页面上该有的东西（到期时间关键字/续期按钮）是不是真的存在，
+        # 都没有的话，说明当前页面状态不对，不能就此认定为"可以续期"。
+        page_looks_valid = ("연장하기" in page_text) or ("유통기한" in page_text)
+        if not page_looks_valid:
+            self.log("⚠️ 页面中既没有冷却提示，也没有找到到期时间/续期按钮相关文字，判断为页面状态异常")
+            return "unknown"
 
         self.log("✅ 页面中未检测到冷却提示，判断为可以续期")
-        return True
+        return "available"
 
     def click_renew(self, sb):
         self.log("⏳ 等待续期按钮...")
@@ -334,12 +348,25 @@ class WeirdHostRenewal:
 
                 # 5. 判断是否可以续期
                 self.log("⏳ 开始检查续期状态...")
-                if not self.renewal_available(sb):
+                renewal_status = self.renewal_available(sb)
+
+                if renewal_status == "cooldown":
                     timestamp = self.get_page_timestamp(sb)
                     screenshot = self.safe_screenshot(sb, "cooldown.png")
                     msg = (
                         "⏳ 时间尚未达到，暂不能续期\n"
                         f"当前服务器到期时间：{timestamp}"
+                    )
+                    self.log(msg)
+                    self.send_telegram_notify(msg, screenshot)
+                    return
+
+                if renewal_status == "unknown":
+                    screenshot = self.safe_screenshot(sb, "unknown_state.png")
+                    msg = (
+                        "❌ 页面状态异常，未能确认续期按钮/到期时间\n"
+                        "可能是 Cloudflare 验证没通过，或者 Cookie 已失效导致没登录成功，"
+                        "本次跳过，不去点击不存在的按钮。请查看截图确认。"
                     )
                     self.log(msg)
                     self.send_telegram_notify(msg, screenshot)
