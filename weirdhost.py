@@ -323,6 +323,80 @@ class WeirdHostRenewal:
             """)
 
         self.log("✅ 已点击 연장하기")
+        self.confirm_dialog_if_present(sb)
+
+    def confirm_dialog_if_present(self, sb):
+        """
+        很多网站的"연장하기"按钮点一下并不会立刻真正续期，而是先弹出一个二次确认弹窗
+        （比如"정말 연장하시겠습니까?"配一个"확인/예/네"按钮），需要再点一次确认按钮，
+        真正的续期请求才会发出去。
+
+        之前脚本点完主按钮就直接当作完成了，从没处理过这种二次确认弹窗——
+        这正好能解释"日志显示已点击成功，但服务器端到期时间完全没变、
+        用户自己上网页看也没续期"这种现象：主按钮点击只是弹出了确认框，
+        真正的确认动作从来没有发生过。
+
+        这里做一次尽量通用的探测：短暂等待后看页面上是否出现了弹窗/对话框，
+        出现的话优先在弹窗范围内找常见确认文案的按钮点掉；
+        找不到明确文案就退而求其次点弹窗里的第一个按钮；
+        如果压根没有弹窗，就什么也不做——说明这个网站本来就没有二次确认这一步，
+        点主按钮就是最终动作。
+        """
+        time.sleep(1.5)
+
+        modal_selectors = [
+            ".swal2-popup",
+            "[role='dialog']",
+            ".modal.show",
+            ".modal.in",
+            ".ReactModal__Content",
+        ]
+
+        modal_found = False
+        matched_selector = None
+        for sel in modal_selectors:
+            try:
+                if sb.is_element_visible(sel):
+                    modal_found = True
+                    matched_selector = sel
+                    break
+            except Exception:
+                continue
+
+        if not modal_found:
+            self.log("ℹ️ 未检测到二次确认弹窗，视为点击主按钮后直接生效")
+            return
+
+        self.log(f"ℹ️ 检测到疑似确认弹窗（{matched_selector}），尝试点击确认按钮...")
+        self.safe_screenshot(sb, "confirm_dialog.png")
+
+        confirm_words = ["확인", "예", "네", "동의", "계속하기", "계속", "확인하기", "구매", "결제", "Confirm", "OK", "Yes"]
+        clicked = False
+        for word in confirm_words:
+            xpath = f'//button[contains(normalize-space(.), "{word}")]'
+            try:
+                if sb.is_element_visible(xpath):
+                    sb.click(xpath)
+                    self.log(f"✅ 已点击确认弹窗中的「{word}」按钮")
+                    clicked = True
+                    break
+            except Exception:
+                continue
+
+        if not clicked:
+            try:
+                sb.execute_script("""
+                    const modal = document.querySelector('.swal2-popup, [role="dialog"], .modal.show, .modal.in, .ReactModal__Content');
+                    if (modal) {
+                        const btn = modal.querySelector('button');
+                        if (btn) btn.click();
+                    }
+                """)
+                self.log("⚠️ 未匹配到明确的确认文案，已尝试点击弹窗内第一个按钮，请结合截图核实")
+            except Exception as e:
+                self.log(f"❌ 弹窗确认按钮点击失败：{e}")
+
+        time.sleep(1.5)
 
     def run(self):
         self.log("=" * 50)
