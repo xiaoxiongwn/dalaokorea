@@ -4,6 +4,7 @@ import json
 import re
 import random
 import traceback
+from urllib.parse import urlparse
 
 import requests
 from seleniumbase import SB
@@ -118,7 +119,22 @@ class WeirdHostRenewal:
         return "未找到"
 
     def open_with_retry(self, sb, url, name, retries=3, reconnect_time=5):
+        """
+        打开页面并重试。
+
+        之前只用 `sb.get_current_url()` 是否非空来判断"打开成功"，
+        但哪怕导航实际失败（网络抖动、DNS 问题、Chrome 报错页、about:blank 等），
+        get_current_url() 也几乎总会返回点什么，导致这个检查形同虚设——
+        表面上"打开成功"了，实际上浏览器根本没停在目标网站上。
+        紧接着的 Cloudflare 检测会因为页面里没有相关关键词而被误判为"已通过"，
+        再往后 inject_cookie 指定域名设置 Cookie 时就会因为当前文档域名对不上
+        而报 invalid cookie domain。
+
+        这里改成额外校验当前页面域名是否真的落在目标域名下，
+        域名对不上就当成打开失败，走重试逻辑。
+        """
         last_error = None
+        expected_host = urlparse(url).netloc
 
         for attempt in range(1, retries + 1):
             try:
@@ -126,9 +142,15 @@ class WeirdHostRenewal:
                 sb.uc_open_with_reconnect(url, reconnect_time=reconnect_time)
                 time.sleep(3)
 
-                if sb.get_current_url():
+                current_url = sb.get_current_url() or ""
+                current_host = urlparse(current_url).netloc
+
+                if current_host and current_host == expected_host:
                     self.log(f"✅ {name}已打开")
                     return True
+                else:
+                    last_error = f"当前页面域名为「{current_host or '空'}」，与目标域名「{expected_host}」不符（当前地址：{current_url or '空'}）"
+                    self.log(f"⚠️ {name}打开后域名校验未通过：{last_error}")
             except Exception as e:
                 last_error = e
                 self.log(f"⚠️ {name}打开失败：{e}")
