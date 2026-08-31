@@ -199,8 +199,39 @@ class WeirdHostRenewal:
 
         return None
 
+    def has_turnstile_widget(self, sb):
+        """检测页面上是否存在 Cloudflare Turnstile 验证组件（那个打勾框）。"""
+        try:
+            return bool(sb.execute_script("""
+                return !!(
+                    document.querySelector('.cf-turnstile') ||
+                    document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
+                    document.querySelector('[data-sitekey]')
+                );
+            """))
+        except Exception:
+            return False
+
     def wait_cloudflare(self, sb, max_attempts=2, poll_seconds=90):
-        """等待页面挑战结束；超时后不直接判定续期失败，由后续面板结果确认。"""
+        """
+        等待 Cloudflare 验证结束；超时后不直接判定续期失败，由后续面板结果确认。
+
+        这里要区分两种完全不同的场景：
+        1. 登录页那种整页拦截式挑战——页面上会出现
+           "just a moment" / "verify you are human" 之类的文案，
+           这些文案消失就说明整页挑战通过了。
+        2. 点击"연장하기"续期按钮后弹出的 Turnstile 打勾框——它并不是整页拦截，
+           页面文字里从头到尾都不会出现上面那些关键词。
+           之前的代码只要"没搜到那几个关键词"就判定"挑战已通过"，
+           对第 2 种场景来说，这个判断在打勾框刚出现、还没来得及自动验证完成时
+           就会误判为"已通过"，导致脚本提前往下走，而真正的验证 Token
+           还没生成，续期请求自然没有真正发出去。
+
+        修复：如果页面上检测到 Turnstile 组件（不管整页文案在不在），
+        就必须等到拿到验证 Token 才算真正通过；
+        只有页面上压根没有 Turnstile 组件、也没有整页拦截文案时，
+        才能直接判定为"已通过/无需验证"。
+        """
         cf_words = [
             "verify you are human",
             "just a moment",
@@ -216,21 +247,33 @@ class WeirdHostRenewal:
                 self.log(f"⚠️ 点击挑战控件失败：{e}")
 
             deadline = time.time() + poll_seconds
+            widget_seen = False
             while time.time() < deadline:
                 try:
                     page_lower = sb.get_page_source().lower()
-                    if not any(word in page_lower for word in cf_words):
-                        self.log("✅ Cloudflare 挑战页面已消失")
-                        return True
                 except Exception as e:
                     self.log(f"⚠️ 检查 Cloudflare 状态失败：{e}")
+                    page_lower = ""
 
-                token = self.get_turnstile_token(sb)
-                if token:
-                    self.log(f"✅ 获取到 Turnstile Token，长度={len(token)}")
+                interstitial_present = any(word in page_lower for word in cf_words)
+                widget_present = self.has_turnstile_widget(sb)
+                if widget_present:
+                    widget_seen = True
+
+                if widget_present:
+                    token = self.get_turnstile_token(sb)
+                    if token:
+                        self.log(f"✅ 检测到 Turnstile 验证组件，已获取 Token（长度={len(token)}），验证完成")
+                        return True
+                    # 组件还在，但 token 还没生成，说明还没验证完，不能提前判定通过
+                elif not interstitial_present:
+                    self.log("✅ 未检测到 Cloudflare 挑战页面或验证组件，视为已通过")
                     return True
 
                 time.sleep(3)
+
+            if widget_seen:
+                self.log("⚠️ 检测到 Turnstile 组件但等待超时，仍未拿到 Token")
 
             if attempt < max_attempts:
                 try:
